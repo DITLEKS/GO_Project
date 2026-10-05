@@ -1,0 +1,14 @@
+# Binaries
+GO_Project
+GO_Project.exe
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Workspace and editor files
+go.work
+.idea/
+.vscode/
+.DS_Store
