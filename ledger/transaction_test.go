@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestAddAndListTransactions(t *testing.T) {
-	transactions = []Transaction{}
+	resetState()
 
 	if err := AddTransaction(Transaction{Amount: 100, Category: "Тест"}); err != nil {
 		t.Fatalf("неожиданная ошибка: %v", err)

@@ -6,6 +6,7 @@ import (
 )
 
 // Transaction описывает финансовую транзакцию.
+// Отрицательная сумма — расход, положительная — доход.
 type Transaction struct {
 	ID          int
 	Amount      float64
@@ -18,6 +19,9 @@ type Transaction struct {
 var transactions = []Transaction{}
 
 // AddTransaction проверяет данные и добавляет транзакцию в хранилище.
+// Если для категории задан бюджет и суммарные расходы по категории вместе
+// с новой транзакцией превышают лимит, возвращается ошибка ErrBudgetExceeded,
+// а транзакция не сохраняется.
 // ID назначается автоматически: len(transactions)+1.
 func AddTransaction(tx Transaction) error {
 	if tx.Amount == 0 {
@@ -25,6 +29,9 @@ func AddTransaction(tx Transaction) error {
 	}
 	if strings.TrimSpace(tx.Category) == "" {
 		return errors.New("категория транзакции не может быть пустой")
+	}
+	if err := checkBudget(tx); err != nil {
+		return err
 	}
 
 	tx.ID = len(transactions) + 1
