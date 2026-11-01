@@ -18,6 +18,18 @@ type Budget struct {
 	Period   string  `json:"period,omitempty"` // период (например, "месяц"), необязательное поле
 }
 
+// Validate реализует Validatable: лимит должен быть положительным, категория — непустой.
+// Метод ничего не логирует, только возвращает ошибку.
+func (b Budget) Validate() error {
+	if strings.TrimSpace(b.Category) == "" {
+		return errors.New("категория бюджета не может быть пустой")
+	}
+	if !(b.Limit > 0) || math.IsInf(b.Limit, 0) {
+		return fmt.Errorf("лимит бюджета для категории %q должен быть больше нуля, получено %.2f", strings.TrimSpace(b.Category), b.Limit)
+	}
+	return nil
+}
+
 // ErrBudgetExceeded возвращается, если транзакция превышает бюджет категории.
 var ErrBudgetExceeded = errors.New("budget exceeded")
 
@@ -30,13 +42,11 @@ var budgets = map[string]Budget{
 
 // SetBudget добавляет новый бюджет или обновляет существующий
 // (например, позволяет изменить лимит для категории).
+// Перед сохранением вызывается b.Validate(); при ошибке бюджет не сохраняется.
 func SetBudget(b Budget) error {
 	b.Category = strings.TrimSpace(b.Category)
-	if b.Category == "" {
-		return errors.New("категория бюджета не может быть пустой")
-	}
-	if b.Limit <= 0 {
-		return fmt.Errorf("лимит бюджета для категории %q должен быть больше нуля, получено %.2f", b.Category, b.Limit)
+	if err := b.Validate(); err != nil {
+		return err
 	}
 	budgets[b.Category] = b
 	return nil
@@ -101,7 +111,7 @@ func LoadBudgets(r io.Reader) error {
 		return fmt.Errorf("ошибка чтения бюджетов: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return errors.New("ошибка парсинга бюджетов: источник пуст")
+		return errors.New("ошибка парсинга бюджетов: источник пус")
 	}
 
 	var list []Budget

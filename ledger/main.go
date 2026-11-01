@@ -23,6 +23,7 @@ func loadBudgetsFromFile(path string) error {
 }
 
 // tryAdd добавляет транзакцию и печатает результат.
+// Логирование происходит здесь, в вызывающем коде, а не в Validate().
 func tryAdd(tx Transaction) {
 	err := AddTransaction(tx)
 	switch {
@@ -32,6 +33,29 @@ func tryAdd(tx Transaction) {
 		fmt.Printf("Ошибка добавления транзакции (%s): %v\n", tx.Description, err)
 	default:
 		fmt.Printf("OK: транзакция %q добавлена (%.2f, %s)\n", tx.Description, tx.Amount, tx.Category)
+	}
+}
+
+// demoValidatable показывает полиморфизм: CheckValid работает и с Transaction, и с Budget.
+func demoValidatable() {
+	fmt.Println("Проверка через интерфейс Validatable:")
+	items := []struct {
+		name string
+		v    Validatable
+	}{
+		{"Transaction (корректная)", Transaction{Amount: -100, Category: "Продукты", Date: "2026-10-01"}},
+		{"Transaction (нулевая сумма)", Transaction{Amount: 0, Category: "Продукты"}},
+		{"Transaction (пустая категория)", Transaction{Amount: 50, Category: ""}},
+		{"Budget (корректный)", Budget{Category: "Связь", Limit: 700}},
+		{"Budget (отрицательный лимит)", Budget{Category: "Связь", Limit: -10}},
+		{"Budget (пустая категория)", Budget{Category: "", Limit: 100}},
+	}
+	for _, it := range items {
+		if err := CheckValid(it.v); err != nil {
+			fmt.Printf("  %s: ошибка — %v\n", it.name, err)
+		} else {
+			fmt.Printf("  %s: OK\n", it.name)
+		}
 	}
 }
 
@@ -72,6 +96,9 @@ func main() {
 	if err := LoadBudgets(strings.NewReader(`[{"category": "Связь", "limit": -10}]`)); err != nil {
 		fmt.Printf("  ошибка: %v\n", err)
 	}
+
+	// 3.1. Демонстрация интерфейса Validatable.
+	demoValidatable()
 
 	// 4. Тестовые сценарии добавления транзакций.
 	fmt.Println("Добавление транзакций:")
