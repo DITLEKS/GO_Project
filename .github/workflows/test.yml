@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -11,31 +14,68 @@ jobs:
       fail-fast: false
       matrix:
         module: [ledger, gateway]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cashapp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cashapp_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/cashapp_test?sslmode=disable
+      REDIS_ADDR: localhost:6379
+      REDIS_DB: '15'
     defaults:
       run:
         working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
           cache: false
-
+      - name: Install Goose
+        run: go install -tags='no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' github.com/pressly/goose/v3/cmd/goose@v3.24.1
+      - name: Migrations up, down, up (dedicated test database)
+        run: |
+          goose -dir ../ledger/migrations postgres "$TEST_DATABASE_URL" up
+          goose -dir ../ledger/migrations postgres "$TEST_DATABASE_URL" down
+          goose -dir ../ledger/migrations postgres "$TEST_DATABASE_URL" up
       - name: go vet
         run: go vet ./...
-
+      - name: Build all packages (including cmd)
+        run: go build ./...
       - name: go test (race + coverage, without cmd/)
-        run: go test -race -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
-
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(go list ./... | grep -v /cmd/)
+          go test -count=1 -race -cover -coverprofile=cover.out "${packages[@]}"
+          go tool cover -html=cover.out -o cover.html
       - name: Total coverage
         run: |
           TOTAL=$(go tool cover -func=cover.out | tail -n 1)
           echo "$TOTAL"
           echo "### Coverage ${{ matrix.module }}: $TOTAL" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload coverage profile
+      - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
           name: cover-${{ matrix.module }}
-          path: ${{ matrix.module }}/cover.out
+          path: |
+            ${{ matrix.module }}/cover.out
+            ${{ matrix.module }}/cover.html
