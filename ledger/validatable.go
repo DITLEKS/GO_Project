@@ -1,4 +1,4 @@
-package main
+package ledger
 
 // Validatable задаёт контракт на проверку валидности данных структуры.
 // Методы Validate() не логируют — они только возвращают error.
