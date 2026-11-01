@@ -11,14 +11,19 @@
 ├── gateway/       # HTTP-шлюз (отдельный Go-модуль, импортирует ledger)
 │   ├── go.mod             # require + replace на ../ledger
 │   ├── main.go            # запуск сервера на :8080
-│   └── internal/api/     # DTO, обработчики, middleware, роутер, тесты
-└── ledger/        # бизнес-логика транзакций и бюджетов (отдельный Go-модуль, пакет ledger)
+│   └── internal/api/
+│       ├── dto.go, handlers.go, middleware.go, router.go
+│       ├── handlers_test.go   # HTTP-интеграционные тесты (httptest)
+│       └── dto_test.go        # параллельные unit-тесты DTO и middleware
+└── ledger/        # бизнес-логика (отдельный Go-модуль, пакет ledger)
     ├── transaction.go       # Transaction, Validate, AddTransaction, ListTransactions
     ├── budget.go            # Budget, Validate, SetBudget, LoadBudgets, проверка лимита
     ├── validatable.go      # интерфейс Validatable, CheckValid
+    ├── reset.go             # Reset() — очистка состояния для тестов
     ├── budgets.json         # бюджеты, загружаемые демо-программой
+    ├── ledger_test.go       # table-driven unit-тесты домена
     ├── *_test.go
-    └── cmd/demo/main.go     # демонстрационные сценарии (бывший ledger/main.go)
+    └── cmd/demo/main.go     # демонстрационные сценарии
 ```
 
 ## ДЗ 1. Введение в Go
@@ -47,12 +52,11 @@ Gateway — HTTP-сервер на порту 8080. Ledger — структур�
 - `Budget.Validate()` — лимит > 0, категория не пустая.
 - `AddTransaction` и `SetBudget` сначала вызывают `Validate()`. Сами `Validate()` ничего не логируют.
 
-### Запуск демо и тестов Ledger
+### Запуск демо Ledger
 
 ```bash
 cd ledger
 go run ./cmd/demo
-go test ./...
 ```
 
 Запускать нужно из каталога `ledger`, т.к. `budgets.json` открывается по относительному пути. Демо печатает загрузку бюджетов, ошибки I/O, блок «Проверка через интерфейс Validatable», добавление транзакций (с отказами по бюджету) и итоги по категориям.
@@ -66,7 +70,6 @@ Gateway — отдельный Go-модуль; модуль `ledger` подкл
 ```bash
 cd gateway
 go run .
-# в другом терминале — проверка (тесты: cd gateway && go test ./...)
 ```
 
 Сервер слушает `:8080`. Каждый запрос логируется в консоль (метод, путь, длительность). Все ответы имеют `Content-Type: application/json; charset=utf-8`.
@@ -137,3 +140,32 @@ curl -i http://localhost:8080/api/budgets
 ```
 
 В Windows PowerShell вместо `\` для переноса строк используйте `` ` ``, а JSON передавайте в одинарных кавычках через `curl.exe`.
+
+## ДЗ 6. Тестирование
+
+### Что покрыто
+
+- **Ledger (`ledger/ledger_test.go`, `validatable_test.go`, `budget_test.go`, `transaction_test.go`)** — table-driven тесты `Transaction.Validate()` и `Budget.Validate()` (валидные и негативные случаи, NaN/Inf, пустая категория, невалидный лимит, дата), бизнес-правило «превышение бюджета → `ErrBudgetExceeded`, транзакция не сохраняется», `Reset()`.
+- **Gateway (`gateway/internal/api/handlers_test.go`, `dto_test.go`)** — HTTP-интеграционные тесты через `httptest`: `POST/GET /api/budgets` (201/200, 400 с `{"error":"..."}`), `POST/GET /api/transactions` (201 и последующий 200, 409 `budget exceeded`, 400 на невалидный JSON), 404/405, логирование, заголовок `Content-Type: application/json; charset=utf-8` в каждом ответе.
+
+Изоляция: хранилище `ledger` — глобальные переменные, поэтому тесты с состоянием вызывают `ledger.Reset()` в начале и в `t.Cleanup` и не параллельны. `t.Parallel()` используется там, где общего состояния нет: табличные тесты `Validate()`, преобразования DTO, `Chain`, маршруты 404/405 и `/ping`.
+
+### Запуск тестов и покрытие
+
+`ledger` и `gateway` — отдельные Go-модули, поэтому тесты запускаются в каждом отдельно:
+
+```bash
+cd ledger
+go test ./... -cover -coverprofile=cover.out
+go tool cover -func=cover.out | tail -n 1       # итоговый процент
+ go tool cover -html=cover.out -o cover.html       # HTML-отчёт (коммитить не нужно)
+
+cd ../gateway
+go test ./... -cover -coverprofile=cover.out
+go tool cover -func=cover.out | tail -n 1
+go tool cover -html=cover.out -o cover.html
+```
+
+Дополнительно полезно прогнать тесты с детектором гонок: `go test -race ./...` (в каждом модуле).
+
+**Покрытие тестами:** ledger — `__%`, gateway — `__%` (заполнить после локального запуска команд выше; команда `cmd/demo` в покрытие не входит).
