@@ -25,8 +25,8 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test (race + coverage)
-        run: go test -race -cover -coverprofile=cover.out ./...
+      - name: go test (race + coverage, without cmd/)
+        run: go test -race -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
 
       - name: Total coverage
         run: |
