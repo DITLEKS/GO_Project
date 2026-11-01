@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -29,36 +30,42 @@ func (t Transaction) Validate() error {
 		return errors.New("категория транзакции не может быть пустой")
 	}
 	if t.Date != "" {
-		if _, err := time.Parse("2006-01-02", t.Date); err != nil {
+		if _, err := time.Parse(dateLayout, t.Date); err != nil {
 			return fmt.Errorf("дата %q должна быть в формате ГГГГ-ММ-ДД", t.Date)
 		}
 	}
 	return nil
 }
 
-// transactions — хранилище транзакций в памяти (изначально пустой срез).
-var transactions = []Transaction{}
-
-// AddTransaction сначала вызывает tx.Validate(): при ошибке транзакция не добавляется,
-// ошибка возвращается вызывающему коду. Затем проверяется бюджет категории:
-// при превышении лимита возвращается ErrBudgetExceeded и транзакция не сохраняется.
-// ID назначается автоматически: len(transactions)+1.
-func AddTransaction(tx Transaction) error {
+// CreateTransaction валидирует транзакцию, проверяет бюджет категории и сохраняет её.
+// При превышении лимита возвращает ErrBudgetExceeded, запись не добавляется.
+// Возвращает созданную транзакцию с назначенным ID (в PostgreSQL — RETURNING id).
+func CreateTransaction(tx Transaction) (Transaction, error) {
 	if err := tx.Validate(); err != nil {
-		return err
+		return Transaction{}, err
 	}
-	if err := checkBudget(tx); err != nil {
-		return err
+	created, err := store.addTransaction(context.Background(), tx)
+	if err != nil {
+		if errors.Is(err, ErrBudgetExceeded) {
+			return Transaction{}, err
+		}
+		return Transaction{}, fmt.Errorf("не удалось сохранить транзакцию: %w", err)
 	}
-
-	tx.ID = len(transactions) + 1
-	transactions = append(transactions, tx)
-	return nil
+	return created, nil
 }
 
-// ListTransactions возвращает копию списка всех транзакций.
-func ListTransactions() []Transaction {
-	result := make([]Transaction, len(transactions))
-	copy(result, transactions)
-	return result
+// AddTransaction — CreateTransaction без возврата созданной записи.
+func AddTransaction(tx Transaction) error {
+	_, err := CreateTransaction(tx)
+	return err
+}
+
+// ListTransactions возвращает все транзакции. В PostgreSQL — ORDER BY date DESC, id DESC;
+// в памяти — в порядке добавления.
+func ListTransactions() ([]Transaction, error) {
+	list, err := store.listTransactions(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать транзакции: %w", err)
+	}
+	return list, nil
 }

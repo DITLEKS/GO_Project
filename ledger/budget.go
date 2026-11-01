@@ -2,13 +2,15 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
-	"sort"
 	"strings"
+	"time"
 )
 
 // Budget описывает бюджет (лимит расходов) для категории.
@@ -33,70 +35,79 @@ func (b Budget) Validate() error {
 // ErrBudgetExceeded возвращается, если транзакция превышает бюджет категории.
 var ErrBudgetExceeded = errors.New("budget exceeded")
 
-// budgets — хранилище бюджетов в памяти: ключ — название категории.
-// Изначально заполнено парой примеров.
-var budgets = map[string]Budget{
-	"Продукты":  {Category: "Продукты", Limit: 5000, Period: "месяц"},
-	"Транспорт": {Category: "Транспорт", Limit: 2000, Period: "месяц"},
+func budgetExceeded(category string, limit, spent, amount float64) error {
+	return fmt.Errorf("%w: категория %q, лимит %.2f, уже потрачено %.2f, попытка потратить ещё %.2f",
+		ErrBudgetExceeded, category, limit, spent, amount)
 }
 
-// SetBudget добавляет новый бюджет или обновляет существующий
-// (например, позволяет изменить лимит для категории).
-// Перед сохранением вызывается b.Validate(); при ошибке бюджет не сохраняется.
+// Ключ и TTL кэша списка бюджетов (работает только при подключённом Redis).
+const (
+	budgetsCacheKey = "budgets:all"
+	budgetsCacheTTL = 15 * time.Second
+)
+
+// SetBudget валидирует бюджет и делает UPSERT по категории; после записи сбрасывает кэш budgets:all.
 func SetBudget(b Budget) error {
 	b.Category = strings.TrimSpace(b.Category)
 	if err := b.Validate(); err != nil {
 		return err
 	}
-	budgets[b.Category] = b
+
+	ctx := context.Background()
+	if err := store.setBudget(ctx, b); err != nil {
+		return fmt.Errorf("не удалось сохранить бюджет: %w", err)
+	}
+	if cacheClient != nil {
+		if err := cacheClient.Del(ctx, budgetsCacheKey); err != nil {
+			log.Printf("кэш бюджетов: не удалось инвалидировать %s (сработает TTL): %v", budgetsCacheKey, err)
+		}
+	}
 	return nil
 }
 
 // GetBudget возвращает бюджет категории и признак его наличия.
-func GetBudget(category string) (Budget, bool) {
-	b, ok := budgets[category]
-	return b, ok
+func GetBudget(category string) (Budget, bool, error) {
+	b, ok, err := store.getBudget(context.Background(), category)
+	if err != nil {
+		return Budget{}, false, fmt.Errorf("не удалось прочитать бюджет %q: %w", category, err)
+	}
+	return b, ok, nil
 }
 
-// ListBudgets возвращает копию всех бюджетов, отсортированную по категории.
-func ListBudgets() []Budget {
-	result := make([]Budget, 0, len(budgets))
-	for _, b := range budgets {
-		result = append(result, b)
+// ListBudgets возвращает все бюджеты, отсортированные по категории.
+// При наличии Redis результат кэшируется на короткий TTL.
+func ListBudgets() ([]Budget, error) {
+	ctx := context.Background()
+	if cacheClient != nil {
+		var cached []Budget
+		hit, err := cacheClient.GetJSON(ctx, budgetsCacheKey, &cached)
+		if err != nil {
+			log.Printf("кэш бюджетов: ошибка чтения: %v", err)
+		} else if hit {
+			return cached, nil
+		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Category < result[j].Category })
-	return result
+
+	list, err := store.listBudgets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать бюджеты: %w", err)
+	}
+	if cacheClient != nil {
+		if err := cacheClient.SetJSON(ctx, budgetsCacheKey, list, budgetsCacheTTL); err != nil {
+			log.Printf("кэш бюджетов: ошибка записи: %v", err)
+		}
+	}
+	return list, nil
 }
 
 // SpentByCategory возвращает сумму расходов по категории.
 // Расходами считаются транзакции с отрицательной суммой; доходы не учитываются.
-func SpentByCategory(category string) float64 {
-	var total float64
-	for _, tx := range transactions {
-		if tx.Category == category && tx.Amount < 0 {
-			total += math.Abs(tx.Amount)
-		}
+func SpentByCategory(category string) (float64, error) {
+	spent, err := store.spentByCategory(context.Background(), category)
+	if err != nil {
+		return 0, fmt.Errorf("не удалось посчитать расходы по категории %q: %w", category, err)
 	}
-	return total
-}
-
-// checkBudget проверяет, не превысит ли транзакция лимит бюджета своей категории.
-// Если бюджет для категории не задан или транзакция является доходом — проверка пропускается.
-func checkBudget(tx Transaction) error {
-	if tx.Amount >= 0 {
-		return nil
-	}
-	b, ok := budgets[tx.Category]
-	if !ok {
-		return nil
-	}
-	spent := SpentByCategory(tx.Category)
-	amount := math.Abs(tx.Amount)
-	if spent+amount > b.Limit {
-		return fmt.Errorf("%w: категория %q, лимит %.2f, уже потрачено %.2f, попытка потратить ещё %.2f",
-			ErrBudgetExceeded, tx.Category, b.Limit, spent, amount)
-	}
-	return nil
+	return spent, nil
 }
 
 // LoadBudgets читает бюджеты в формате JSON (массив объектов) из r
