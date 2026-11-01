@@ -1,9 +1,11 @@
 package ledger
 
-// Reset очищает хранилища транзакций и бюджетов (включая бюджеты по умолчанию).
-// Предназначена для изоляции тестов: вызывайте в начале теста или в t.Cleanup.
-// Не потокобезопасна, как и остальное хранилище пакета.
-func Reset() {
-	transactions = []Transaction{}
-	budgets = map[string]Budget{}
+// Reset deletes ALL ledger data and resets IDs. Never call at startup.
+// Tests must use a dedicated TEST_DATABASE_URL, not production data.
+func Reset() error {
+ db,err:=dbConn();if err!=nil { return err }
+ ctx,cancel:=operationContext();defer cancel()
+ if _,err:=db.ExecContext(ctx,"TRUNCATE expenses, budgets RESTART IDENTITY");err!=nil { return err }
+ invalidateReports(ctx)
+ return nil
 }
