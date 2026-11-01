@@ -12,3 +12,10 @@ go.work
 .idea/
 .vscode/
 .DS_Store
+
+# Local credentials and coverage artifacts
+.env
+.env.*
+!.env.example
+**/cover.out
+**/cover.html

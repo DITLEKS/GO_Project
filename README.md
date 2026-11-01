@@ -1,180 +1,129 @@
 # GO_Project
 
-Домашние задания по дисциплине **«Язык Go»**. Требуется Go 1.22 или новее.
+Дисциплина «Язык Go», темы 1–7. Требуются Go 1.22+, PostgreSQL 16+, Redis 7+.
 
-## Структура репозитория
+## Архитектура
 
-```text
-.
-├── main.go        # ДЗ 1: имя пользователя, CLI-аргументы, версия Go
-├── go.mod
-├── gateway/       # HTTP-шлюз (отдельный Go-модуль, импортирует ledger)
-│   ├── go.mod             # require + replace на ../ledger
-│   ├── main.go            # запуск сервера на :8080
-│   └── internal/api/
-│       ├── dto.go, handlers.go, middleware.go, router.go
-│       ├── handlers_test.go   # HTTP-интеграционные тесты (httptest)
-│       └── dto_test.go        # параллельные unit-тесты DTO и middleware
-└── ledger/        # бизнес-логика (отдельный Go-модуль, пакет ledger)
-    ├── transaction.go       # Transaction, Validate, AddTransaction, ListTransactions
-    ├── budget.go            # Budget, Validate, SetBudget, LoadBudgets, проверка лимита
-    ├── validatable.go      # интерфейс Validatable, CheckValid
-    ├── reset.go             # Reset() — очистка состояния для тестов
-    ├── budgets.json         # бюджеты, загружаемые демо-программой
-    ├── ledger_test.go       # table-driven unit-тесты домена
-    ├── *_test.go
-    └── cmd/demo/main.go     # демонстрационные сценарии
-```
+`gateway/` — HTTP-сервер :8080, импортирует модуль `ledger` через локальный replace. `ledger/` — валидация и бизнес-логика; **данные только в PostgreSQL**, отчёты кешируются в Redis на 30 секунд. `ledger/migrations/` — миграции Goose, `compose.yml` — локальные зависимости, `.github/workflows/test.yml` — CI с реальными PostgreSQL/Redis.
 
-## ДЗ 1. Введение в Go
+Ledger пока библиотека, не отдельный HTTP/RPC-сервис. Gateway открывает собственный пул Ledger. `ledger/cmd/server` отдельно проверяет готовность инфраструктуры; Gateway не обращается к нему по сети.
+
+## Запуск и миграции
+
+Из корня:
 
 ```bash
-go run . arg1 arg2
+docker compose up -d --wait
+cp .env.example .env
+set -a; . ./.env; set +a
+go install -tags='no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' github.com/pressly/goose/v3/cmd/goose@v3.24.1
+export PATH="$(go env GOPATH)/bin:$PATH"
+goose -dir ledger/migrations postgres "$DATABASE_URL" up
+(cd gateway && go run .)
 ```
 
-## ДЗ 2. Функции: Gateway и Ledger
-
-Gateway — HTTP-сервер на порту 8080. Ledger — структура `Transaction` (ID, Amount, Category, Description, Date), хранилище в памяти, функции `AddTransaction` и `ListTransactions`.
-
-## ДЗ 3. Ввод-вывод (I/O). Обработка ошибок: бюджеты в Ledger
-
-- **`Budget`** — категория (`Category`), лимит (`Limit`), необязательный период (`Period`). JSON-теги: `category`, `limit`, `period`.
-- **Хранилище бюджетов** — `map[string]Budget`, ключ — категория. Изначально: «Продукты» — 5000, «Транспорт» — 2000.
-- **`SetBudget(b Budget) error`** — добавляет или обновляет бюджет; ошибка при пустой категории или лимите ≤0.
-- **`AddTransaction(tx Transaction) error`** — если расходы по категории вместе с новой транзакцией превышают `Limit`, возвращается `ErrBudgetExceeded` (`"budget exceeded"`), транзакция не сохраняется. Расходы — отрицательные суммы; доходы и категории без бюджета не ограничиваются.
-- **`SpentByCategory(category string) float64`** — сумма расходов по категории.
-- **`LoadBudgets(r io.Reader) error`** — читает JSON-массив бюджетов и добавляет через `SetBudget`; понятные ошибки для nil-reader, ошибки чтения, пустого источника, невалидного JSON и невалидного бюджета.
-
-## ДЗ 4. ООП: интерфейс Validatable
-
-- `Validatable` — интерфейс с одним методом `Validate() error`; `CheckValid(v Validatable) error` работает с любым типом, реализующим интерфейс.
-- `Transaction.Validate()` — сумма не равна 0 (отрицательная допустима: это расход), категория не пустая, непустая дата — `ГГГГ-ММ-ДД`.
-- `Budget.Validate()` — лимит > 0, категория не пустая.
-- `AddTransaction` и `SetBudget` сначала вызывают `Validate()`. Сами `Validate()` ничего не логируют.
-
-### Запуск демо Ledger
+Без Docker: создайте PostgreSQL-базу `createdb -h localhost -U postgres cashapp`, запустите Redis локально. Применяйте миграции **до** запуска. Проверка/откат:
 
 ```bash
-cd ledger
-go run ./cmd/demo
+goose -dir ledger/migrations postgres "$DATABASE_URL" status
+goose -dir ledger/migrations postgres "$DATABASE_URL" down
+# Отдельный Ledger, с теми же env:
+(cd ledger && go run ./cmd/server)
 ```
 
-Запускать нужно из каталога `ledger`, т.к. `budgets.json` открывается по относительному пути. Демо печатает загрузку бюджетов, ошибки I/O, блок «Проверка через интерфейс Validatable», добавление транзакций (с отказами по бюджету) и итоги по категориям.
+Каждая SQL-миграция содержит обе секции Goose Up/Down. `down` откатывает последнюю, `down-to 0` — все; откат удаляет таблицы/данные. `budgets`: UNIQUE category, NUMERIC(14,2) limit_amount > 0, дополнительный period для совместимости. `expenses`: SERIAL id, NUMERIC(14,2) amount <> 0, DATE NOT NULL, индекс (category,date).
 
-## ДЗ 5. Веб-приложения: REST API в Gateway
+## Переменные окружения
 
-Gateway — отдельный Go-модуль; модуль `ledger` подключен через `require` + `replace ... => ../ledger` в `gateway/go.mod`. Хранилище — в памяти (при перезапуске сервера данные сбрасываются, кроме двух бюджетов по умолчанию).
+| Переменная | Значение/назначение |
+|---|---|
+| DATABASE_URL | Приоритетная строка PostgreSQL; пример в .env.example |
+| DB_HOST, DB_PORT | localhost, 5432; только если нет DATABASE_URL |
+| DB_USER, DB_PASS, DB_NAME | postgres, postgres, cashapp; fallback DSN с экранированием |
+| REDIS_ADDR | localhost:6379 |
+| REDIS_DB | 0, неотрицательное целое |
+| REDIS_PASSWORD | Необязательный пароль |
 
-### Запуск
+`.env` автоматически не читается, экспортируйте как выше. Реальные пароли не коммитьте. При старте: sql.Open("pgx"), Ping, проверка схемы, Redis Ping; ошибка завершает приложение. Пул PostgreSQL: MaxOpenConns=10, MaxIdleConns=5, ConnMaxLifetime=30 минут. SQL-операции имеют таймаут. Redis-сбой после старта не блокирует SQL-отчёт (fail-open).
+
+## HTTP API
+
+| Метод | Путь | Ответ |
+|---|---|---|
+| GET | /ping | 200, {"message":"pong"} |
+| POST | /api/budgets | UPSERT, 201 и бюджет |
+| GET | /api/budgets | 200, массив по category |
+| POST | /api/transactions | 201 и запись с SQL ID; 409 при превышении |
+| GET | /api/transactions | 200, массив по date DESC, id DESC |
+| GET | /api/reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD | 200, отчёт за включительный интервал |
+
+Все ответы: `application/json; charset=utf-8`, ошибки `{"error":"…"}`. Валидация/JSON → 400, превышение → 409 `budget exceeded`, SQL → 500 без раскрытия SQL клиенту, неизвестный путь → 404, метод → 405. Пустые списки → []. Middleware логирует метод, путь, длительность.
+
+Прежние пути/DTO сохранены. Gateway минимально адаптирован к `(slice,error)` и точному SQL ID; добавлен ранее отсутствовавший маршрут отчёта.
+
+### Правила
+
+Как в темах 2–6: **отрицательная сумма — расход, положительная — доход**. Доход не уменьшает потраченный бюджет, категория без бюджета не ограничивается. Проверка `SUM(-amount) WHERE amount<0` и INSERT атомарны с advisory lock категории; SetBudget использует тот же lock. Бюджет накопительный, period — информационное поле, не месячный фильтр.
+
+Validate ничего не логирует; вызывается перед записью. Деньги округляются до копейки, NUMERIC(14,2); ноль/NaN/Inf, суммы вне диапазона и округляющиеся в ноль отклоняются. Пустая дата становится сегодняшней UTC-датой; непустая — строго YYYY-MM-DD.
+
+### Проверка cURL
 
 ```bash
-cd gateway
-go run .
+# 201
+curl -i -X POST localhost:8080/api/budgets -H 'Content-Type: application/json' -d '{"category":"еда","limit":5000}'
+# 201
+curl -i -X POST localhost:8080/api/transactions -H 'Content-Type: application/json' -d '{"amount":-3000,"category":"еда","description":"продукты","date":"2026-11-01"}'
+# 409, вставки нет: 3000+2500 > 5000
+curl -i -X POST localhost:8080/api/transactions -H 'Content-Type: application/json' -d '{"amount":-2500,"category":"еда","date":"2026-11-02"}'
+curl -i localhost:8080/api/transactions
+curl -i localhost:8080/api/budgets
+# cache miss, затем cache hit (в консоли сервера)
+curl -i 'localhost:8080/api/reports/summary?from=2026-11-01&to=2026-11-30'
+curl -i 'localhost:8080/api/reports/summary?from=2026-11-01&to=2026-11-30'
 ```
 
-Сервер слушает `:8080`. Каждый запрос логируется в консоль (метод, путь, длительность). Все ответы имеют `Content-Type: application/json; charset=utf-8`.
+Отчёт содержит from, to, income, expenses (положительный объём расходов), balance, categories (знаковые суммы). Redis-ключ: `report:summary:<from>:<to>:v<generation>`, TTL 30 секунд. Запись транзакции меняет поколение всех интервалов; старые ключи истекают по TTL. При сбое инвалидации устаревание ограничено TTL. Разным PostgreSQL-базам/тестам нужен отдельный REDIS_DB. Бюджеты не кешируются.
 
-### Эндпоинты
+### Перезапуск
 
-| Метод | Путь | Описание | Успех | Ошибки |
-|-------|------|----------|-------|--------|
-| GET | `/ping` | проверка живости, `{"message":"pong"}` | 200 | 405 |
-| POST | `/api/transactions` | создать транзакцию | 201 + `TransactionResponse` | 400 (валидация/JSON), 409 (`budget exceeded`), 500 |
-| GET | `/api/transactions` | список транзакций (`[]`, если пусто) | 200 | — |
-| POST | `/api/budgets` | создать или обновить бюджет | 201 + `BudgetResponse` | 400, 500 |
-| GET | `/api/budgets` | список бюджетов | 200 | — |
+Сохраните ответы GET, остановите Gateway (Ctrl+C), снова запустите `go run .` из gateway, повторите GET: строки и ID останутся. Перезапуск Ledger/`docker compose restart` также сохраняет данные. **docker compose down -v удаляет том и данные**. Reset при старте не вызывается.
 
-Формат ошибок: `{"error":"описание"}`. Неизвестный путь — 404, недопустимый метод — 405 (тоже в JSON). Лишние поля в теле запроса отклоняются с 400.
+## Тесты и покрытие
 
-Сумма транзакции: положительная — доход, отрицательная — расход (только расходы учитываются в бюджете); `0` запрещён.
+Независимые table-driven unit-тесты используют t.Run/t.Parallel. SQL/HTTP-тесты — с настоящими PostgreSQL/Redis, без параллельного Reset. Проверяются валидация, UPSERT, 409 без вставки, сортировка, ID, отчёты, TTL, cache hit/invalidation, переподключение, конкурентное соблюдение лимита.
 
-### Примеры cURL
-
-Создать транзакцию (201):
+**Reset() удаляет ВСЕ строки и сбрасывает ID. Только отдельная тестовая БД!** Без TEST_DATABASE_URL интеграционные тесты явно пропускаются; CI всегда включает их.
 
 ```bash
-curl -i -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"amount":450,"category":"еда","description":"ланч","date":"2025-09-10"}'
-# {"id":1,"amount":450,"category":"еда","description":"ланч","date":"2025-09-10"}
+# Из корня, зависимости уже запущены:
+createdb -h localhost -U postgres cashapp_test
+export TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/cashapp_test?sslmode=disable'
+export REDIS_ADDR=localhost:6379 REDIS_DB=15
+goose -dir ledger/migrations postgres "$TEST_DATABASE_URL" up
+# Последовательно, т.к. тесты очищают одну БД:
+for module in ledger gateway; do
+  (
+    cd "$module"
+    go vet ./...
+    go build ./...
+    go test -count=1 -race -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
+    go tool cover -func=cover.out | tail -n 1
+    go tool cover -html=cover.out -o cover.html
+  ) || exit 1
+done
 ```
 
-Ошибка валидации (400):
+Замер темы 7 на Go 1.22.12, PostgreSQL 18, Redis 8 (CI: PostgreSQL 16, Redis 7):
 
-```bash
-curl -i -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"amount":0,"category":"еда"}'
-# {"error":"сумма транзакции не может быть равна нулю или быть некорректным числом"}
-```
+| Область | Покрытие statements |
+|---|---:|
+| ledger | 84.9% |
+| ledger/internal/cache | 68.2% |
+| Модуль Ledger без cmd/ | 83.6% |
+| gateway/internal/api | 86.6% |
+| Весь Gateway с main.go | 73.0% |
 
-Список транзакций (200):
+`go vet`, сборка и race-тесты прошли. Дополнительно проверены Goose up/down-to 0/up, HTTP 201/201/409, cache miss → hit и **настоящий перезапуск процесса Gateway** с сохранением GET/ID. CI пересчитывает покрытие на каждом push/PR и публикует cover.out/cover.html; его свежие результаты приоритетнее локального замера. Старые 100%/91.6% темы 6 относились к реализации в памяти, не SQL-версии. cmd/ исключён из покрытия, но собирается; main.go Gateway включён в итог.
 
-```bash
-curl -i http://localhost:8080/api/transactions
-```
-
-Создать бюджет (201) и превысить его (409):
-
-```bash
-curl -i -X POST http://localhost:8080/api/budgets \
-  -H "Content-Type: application/json" \
-  -d '{"category":"кафе","limit":1000}'
-# {"category":"кафе","limit":1000}
-
-curl -i -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"amount":-1500,"category":"кафе","description":"ужин","date":"2025-09-11"}'
-# HTTP/1.1 409 Conflict
-# {"error":"budget exceeded"}
-```
-
-Некорректный бюджет (400) и список бюджетов (200):
-
-```bash
-curl -i -X POST http://localhost:8080/api/budgets \
-  -H "Content-Type: application/json" \
-  -d '{"category":"кафе","limit":-5}'
-
-curl -i http://localhost:8080/api/budgets
-```
-
-В Windows PowerShell вместо `\` для переноса строк используйте `` ` ``, а JSON передавайте в одинарных кавычках через `curl.exe`.
-
-## ДЗ 6. Тестирование
-
-### Что покрыто
-
-- **Ledger (`ledger/ledger_test.go`, `validatable_test.go`, `budget_test.go`, `transaction_test.go`)** — table-driven тесты `Transaction.Validate()` и `Budget.Validate()` (валидные и негативные случаи, NaN/Inf, пустая категория, невалидный лимит, дата), бизнес-правило «превышение бюджета → `ErrBudgetExceeded`, транзакция не сохраняется», `Reset()`.
-- **Gateway (`gateway/internal/api/handlers_test.go`, `dto_test.go`)** — HTTP-интеграционные тесты через `httptest`: `POST/GET /api/budgets` (201/200, 400 с `{"error":"..."}`), `POST/GET /api/transactions` (201 и последующий 200, 409 `budget exceeded`, 400 на невалидный JSON), 404/405, логирование, заголовок `Content-Type: application/json; charset=utf-8` в каждом ответе.
-
-Изоляция: хранилище `ledger` — глобальные переменные, поэтому тесты с состоянием вызывают `ledger.Reset()` в начале и в `t.Cleanup` и не параллельны. `t.Parallel()` используется там, где общего состояния нет: табличные тесты `Validate()`, преобразования DTO, `Chain`, маршруты 404/405 и `/ping`.
-
-### Запуск тестов и покрытие
-
-`ledger` и `gateway` — отдельные Go-модули, поэтому тесты запускаются в каждом отдельно. Демо-программа `ledger/cmd/demo` не тестируется, поэтому `cmd/` исключается из замера (иначе она добавляет 0% и занижает итог):
-
-```bash
-cd ledger
-go test -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
-go tool cover -func=cover.out | tail -n 1       # итоговый процент
-go tool cover -html=cover.out -o cover.html     # HTML-отчёт (коммитить не нужно)
-
-cd ../gateway
-go test -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
-go tool cover -func=cover.out | tail -n 1
-go tool cover -html=cover.out -o cover.html
-```
-
-Дополнительно полезно прогнать тесты с детектором гонок: `go test -race ./...` (в каждом модуле). Те же команды (с `-race`) автоматически запускает GitHub Actions (`.github/workflows/test.yml`) на каждый push и pull request.
-
-### Достигнутое покрытие
-
-Замер в CI (`go test -race -cover`, Go 1.22):
-
-| Модуль | Пакет | Покрытие |
-|--------|-------|----------|
-| ledger | `ledger` | 100.0% |
-| gateway | `gateway/internal/api` | 91.6% |
-
-Итог по модулю `ledger` — **100.0%**. Итог по модулю `gateway` — **87.5%**: в расчёт входит `gateway/main.go` (запуск HTTP-сервера), на который тестов нет. Покрытие тестами ≈ 91–100%.
+Прежние задания: корневой `go run . arg1 arg2` (тема 1), `ledger.LoadBudgets(io.Reader)` (I/O), Validatable/CheckValid (ООП), Gateway DTO/middleware/REST, тесты. Демо: `(cd ledger && go run ./cmd/demo)` — **записывает примеры в БД**, только для учебной базы. Подробности — в README сервисов.
