@@ -152,20 +152,29 @@ curl -i http://localhost:8080/api/budgets
 
 ### Запуск тестов и покрытие
 
-`ledger` и `gateway` — отдельные Go-модули, поэтому тесты запускаются в каждом отдельно:
+`ledger` и `gateway` — отдельные Go-модули, поэтому тесты запускаются в каждом отдельно. Демо-программа `ledger/cmd/demo` не тестируется, поэтому `cmd/` исключается из замера (иначе она добавляет 0% и занижает итог):
 
 ```bash
 cd ledger
-go test ./... -cover -coverprofile=cover.out
+go test -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
 go tool cover -func=cover.out | tail -n 1       # итоговый процент
- go tool cover -html=cover.out -o cover.html       # HTML-отчёт (коммитить не нужно)
+go tool cover -html=cover.out -o cover.html     # HTML-отчёт (коммитить не нужно)
 
 cd ../gateway
-go test ./... -cover -coverprofile=cover.out
+go test -cover -coverprofile=cover.out $(go list ./... | grep -v /cmd/)
 go tool cover -func=cover.out | tail -n 1
 go tool cover -html=cover.out -o cover.html
 ```
 
-Дополнительно полезно прогнать тесты с детектором гонок: `go test -race ./...` (в каждом модуле).
+Дополнительно полезно прогнать тесты с детектором гонок: `go test -race ./...` (в каждом модуле). Те же команды (с `-race`) автоматически запускает GitHub Actions (`.github/workflows/test.yml`) на каждый push и pull request.
 
-**Покрытие тестами:** ledger — `__%`, gateway — `__%` (заполнить после локального запуска команд выше; команда `cmd/demo` в покрытие не входит).
+### Достигнутое покрытие
+
+Замер в CI (`go test -race -cover`, Go 1.22):
+
+| Модуль | Пакет | Покрытие |
+|--------|-------|----------|
+| ledger | `ledger` | 100.0% |
+| gateway | `gateway/internal/api` | 91.6% |
+
+Итог по модулю `ledger` — **100.0%**. Итог по модулю `gateway` — **87.5%**: в расчёт входит `gateway/main.go` (запуск HTTP-сервера), на который тестов нет. Покрытие тестами ≈ 91–100%.
