@@ -1,4 +1,4 @@
-package main
+package ledger
 
 import (
 	"bytes"
@@ -111,7 +111,7 @@ func LoadBudgets(r io.Reader) error {
 		return fmt.Errorf("ошибка чтения бюджетов: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return errors.New("ошибка парсинга бюджетов: источник пус")
+		return errors.New("ошибка парсинга бюджетов: источник пуст")
 	}
 
 	var list []Budget

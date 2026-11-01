@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/DITLEKS/GO_Project/ledger"
 )
 
 // loadBudgetsFromFile открывает файл, оборачивает его в bufio.Reader и загружает бюджеты.
@@ -16,7 +18,7 @@ func loadBudgetsFromFile(path string) error {
 	}
 	defer f.Close()
 
-	if err := LoadBudgets(bufio.NewReader(f)); err != nil {
+	if err := ledger.LoadBudgets(bufio.NewReader(f)); err != nil {
 		return fmt.Errorf("не удалось загрузить бюджеты из %s: %w", path, err)
 	}
 	return nil
@@ -24,10 +26,10 @@ func loadBudgetsFromFile(path string) error {
 
 // tryAdd добавляет транзакцию и печатает результат.
 // Логирование происходит здесь, в вызывающем коде, а не в Validate().
-func tryAdd(tx Transaction) {
-	err := AddTransaction(tx)
+func tryAdd(tx ledger.Transaction) {
+	err := ledger.AddTransaction(tx)
 	switch {
-	case errors.Is(err, ErrBudgetExceeded):
+	case errors.Is(err, ledger.ErrBudgetExceeded):
 		fmt.Printf("ОТКАЗ: транзакция %q отклонена — %v\n", tx.Description, err)
 	case err != nil:
 		fmt.Printf("Ошибка добавления транзакции (%s): %v\n", tx.Description, err)
@@ -41,17 +43,17 @@ func demoValidatable() {
 	fmt.Println("Проверка через интерфейс Validatable:")
 	items := []struct {
 		name string
-		v    Validatable
+		v    ledger.Validatable
 	}{
-		{"Transaction (корректная)", Transaction{Amount: -100, Category: "Продукты", Date: "2026-10-01"}},
-		{"Transaction (нулевая сумма)", Transaction{Amount: 0, Category: "Продукты"}},
-		{"Transaction (пустая категория)", Transaction{Amount: 50, Category: ""}},
-		{"Budget (корректный)", Budget{Category: "Связь", Limit: 700}},
-		{"Budget (отрицательный лимит)", Budget{Category: "Связь", Limit: -10}},
-		{"Budget (пустая категория)", Budget{Category: "", Limit: 100}},
+		{"Transaction (корректная)", ledger.Transaction{Amount: -100, Category: "Продукты", Date: "2026-10-01"}},
+		{"Transaction (нулевая сумма)", ledger.Transaction{Amount: 0, Category: "Продукты"}},
+		{"Transaction (пустая категория)", ledger.Transaction{Amount: 50, Category: ""}},
+		{"Budget (корректный)", ledger.Budget{Category: "Связь", Limit: 700}},
+		{"Budget (отрицательный лимит)", ledger.Budget{Category: "Связь", Limit: -10}},
+		{"Budget (пустая категория)", ledger.Budget{Category: "", Limit: 100}},
 	}
 	for _, it := range items {
-		if err := CheckValid(it.v); err != nil {
+		if err := ledger.CheckValid(it.v); err != nil {
 			fmt.Printf("  %s: ошибка — %v\n", it.name, err)
 		} else {
 			fmt.Printf("  %s: OK\n", it.name)
@@ -63,12 +65,12 @@ func main() {
 	fmt.Println("Ledger service started")
 
 	// 1. Начальные бюджеты через SetBudget.
-	initialBudgets := []Budget{
+	initialBudgets := []ledger.Budget{
 		{Category: "Продукты", Limit: 5000, Period: "месяц"},
 		{Category: "Транспорт", Limit: 2000, Period: "месяц"},
 	}
 	for _, b := range initialBudgets {
-		if err := SetBudget(b); err != nil {
+		if err := ledger.SetBudget(b); err != nil {
 			fmt.Printf("Ошибка установки бюджета (%s): %v\n", b.Category, err)
 		}
 	}
@@ -81,7 +83,7 @@ func main() {
 	}
 
 	fmt.Println("Текущие бюджеты:")
-	for _, b := range ListBudgets() {
+	for _, b := range ledger.ListBudgets() {
 		fmt.Printf("Категория=%s | Лимит=%.2f | Период=%s\n", b.Category, b.Limit, b.Period)
 	}
 
@@ -90,10 +92,10 @@ func main() {
 	if err := loadBudgetsFromFile("missing.json"); err != nil {
 		fmt.Printf("  ошибка: %v\n", err)
 	}
-	if err := LoadBudgets(strings.NewReader(`{"category": "не массив"}`)); err != nil {
+	if err := ledger.LoadBudgets(strings.NewReader(`{"category": "не массив"}`)); err != nil {
 		fmt.Printf("  ошибка: %v\n", err)
 	}
-	if err := LoadBudgets(strings.NewReader(`[{"category": "Связь", "limit": -10}]`)); err != nil {
+	if err := ledger.LoadBudgets(strings.NewReader(`[{"category": "Связь", "limit": -10}]`)); err != nil {
 		fmt.Printf("  ошибка: %v\n", err)
 	}
 
@@ -102,7 +104,7 @@ func main() {
 
 	// 4. Тестовые сценарии добавления транзакций.
 	fmt.Println("Добавление транзакций:")
-	testData := []Transaction{
+	testData := []ledger.Transaction{
 		{Amount: -1500.50, Category: "Продукты", Description: "Покупка продуктов в магазине", Date: "2026-10-01"},
 		{Amount: 85000, Category: "Зарплата", Description: "Зарплата за сентябрь", Date: "2026-10-02"},
 		{Amount: -450, Category: "Транспорт", Description: "Проездной на метро", Date: "2026-10-03"},
@@ -120,20 +122,20 @@ func main() {
 
 	// 5. Изменение лимита через SetBudget и повторная попытка.
 	fmt.Println("Увеличиваем лимит бюджета «Транспорт» до 3000:")
-	if err := SetBudget(Budget{Category: "Транспорт", Limit: 3000, Period: "месяц"}); err != nil {
+	if err := ledger.SetBudget(ledger.Budget{Category: "Транспорт", Limit: 3000, Period: "месяц"}); err != nil {
 		fmt.Printf("Ошибка установки бюджета: %v\n", err)
 	}
-	tryAdd(Transaction{Amount: -1800, Category: "Транспорт", Description: "Такси в аэропорт (повтор)", Date: "2026-10-07"})
+	tryAdd(ledger.Transaction{Amount: -1800, Category: "Транспорт", Description: "Такси в аэропорт (повтор)", Date: "2026-10-07"})
 
 	// 6. Итоги.
 	fmt.Println("Список транзакций:")
-	for _, tx := range ListTransactions() {
+	for _, tx := range ledger.ListTransactions() {
 		fmt.Printf("ID=%d | Сумма=%.2f | Категория=%s | Описание=%s | Дата=%s\n",
 			tx.ID, tx.Amount, tx.Category, tx.Description, tx.Date)
 	}
 
 	fmt.Println("Расходы по категориям с бюджетом:")
-	for _, b := range ListBudgets() {
-		fmt.Printf("Категория=%s | Потрачено=%.2f | Лимит=%.2f\n", b.Category, SpentByCategory(b.Category), b.Limit)
+	for _, b := range ledger.ListBudgets() {
+		fmt.Printf("Категория=%s | Потрачено=%.2f | Лимит=%.2f\n", b.Category, ledger.SpentByCategory(b.Category), b.Limit)
 	}
 }
