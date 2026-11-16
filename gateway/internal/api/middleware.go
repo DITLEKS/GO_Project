@@ -4,23 +4,19 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"time"
 )
 
 const (
-	// DefaultRequestTimeout is the time limit for one API request.
 	DefaultRequestTimeout = 2 * time.Second
-	// requestTimeoutEnv overrides the default; the value is a Go duration, e.g. "500ms" or "3s".
 	requestTimeoutEnv = "GATEWAY_REQUEST_TIMEOUT"
-	// timeoutMessage is returned with 504 Gateway Timeout when a request is cancelled or times out.
 	timeoutMessage = "request timeout"
 )
 
-// Middleware — обёртка над http.Handler.
 type Middleware func(next http.Handler) http.Handler
 
-// Logging логирует метод, путь и длительность обработки каждого запроса.
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -29,7 +25,6 @@ func Logging(next http.Handler) http.Handler {
 	})
 }
 
-// JSONContentType добавляет ко всем ответам единый Content-Type.
 func JSONContentType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentTypeJSON)
@@ -37,8 +32,6 @@ func JSONContentType(next http.Handler) http.Handler {
 	})
 }
 
-// RequestTimeout возвращает таймаут запроса: GATEWAY_REQUEST_TIMEOUT или значение по умолчанию.
-// Некорректное или неположительное значение игнорируется.
 func RequestTimeout() time.Duration {
 	raw := os.Getenv(requestTimeoutEnv)
 	if raw == "" {
@@ -52,20 +45,57 @@ func RequestTimeout() time.Duration {
 	return d
 }
 
-// Timeout создаёт для каждого запроса context.WithTimeout и передаёт его дальше через *http.Request.
-// Обработчик получает ctx из r.Context(); сервис и SQL-запросы прерываются по ctx.Done(),
-// после чего обработчик отвечает 504 и {"error":"request timeout"}.
+// Timeout buffers finite JSON responses. Only this goroutine writes to the client.
+// Late handler writes remain in a private buffer and cannot change the 504 response.
+// Cancellation of handler work is cooperative: handlers and SQL must observe ctx.
+// Streaming, flushing and hijacking are deliberately not supported by this API middleware.
 func Timeout(d time.Duration) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(r.Context(), d)
 			defer cancel()
-			next.ServeHTTP(w, r.WithContext(ctx))
+			if ctx.Err() != nil {
+				writeError(w, http.StatusGatewayTimeout, timeoutMessage)
+				return
+			}
+			buffer := httptest.NewRecorder()
+			done := make(chan struct{})
+			var panicValue any
+			go func() {
+				defer close(done)
+				defer func() {
+					if value := recover(); value != nil {
+						panicValue = value
+						log.Printf("API handler panic: %v", value)
+					}
+				}()
+				next.ServeHTTP(buffer, r.WithContext(ctx))
+			}()
+			select {
+			case <-ctx.Done():
+				writeError(w, http.StatusGatewayTimeout, timeoutMessage)
+				return
+			case <-done:
+				// Deadline wins even when both select cases are ready.
+				if ctx.Err() != nil {
+					writeError(w, http.StatusGatewayTimeout, timeoutMessage)
+					return
+				}
+				if panicValue != nil {
+					panic(panicValue)
+				}
+				for key, values := range buffer.Header() {
+					w.Header()[key] = append([]string(nil), values...)
+				}
+				w.WriteHeader(buffer.Code)
+				if _, err := w.Write(buffer.Body.Bytes()); err != nil {
+					log.Printf("write API response: %v", err)
+				}
+			}
 		})
 	}
 }
 
-// Chain оборачивает h в middleware; первый в списке — внешний.
 func Chain(h http.Handler, mws ...Middleware) http.Handler {
 	for i := len(mws) - 1; i >= 0; i-- {
 		h = mws[i](h)
