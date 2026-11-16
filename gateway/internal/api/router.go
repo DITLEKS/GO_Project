@@ -19,6 +19,7 @@ func NewRouterWithTimeout(svc ledger.Service, timeout time.Duration) http.Handle
 	h := NewHandler(svc)
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/transactions", h.Transactions)
+	apiMux.HandleFunc("/transactions/bulk", h.TransactionsBulk)
 	apiMux.HandleFunc("/budgets", h.Budgets)
 	apiMux.HandleFunc("/reports/summary", h.ReportSummary)
 	apiMux.HandleFunc("/", notFound)
