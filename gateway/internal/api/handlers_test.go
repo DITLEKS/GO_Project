@@ -4,6 +4,7 @@ import (
  "bytes"
  "context"
  "encoding/json"
+ "errors"
  "fmt"
  "io"
  "log"
@@ -14,19 +15,27 @@ import (
  "testing"
  "github.com/DITLEKS/GO_Project/ledger"
 )
+// testSvc is built once by the Ledger factory, exactly as in main.go.
+var testSvc ledger.Service
 func TestMain(m *testing.M){
  log.SetOutput(io.Discard)
  if dsn:=os.Getenv("TEST_DATABASE_URL");dsn!=""{
   os.Setenv("DATABASE_URL",dsn)
-  if err:=ledger.Initialize(context.Background());err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
-  code:=m.Run();_ = ledger.Close();os.Exit(code)
+  svc,closeFn,err:=ledger.NewService(context.Background())
+  if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+  testSvc=svc
+  code:=m.Run();_ = closeFn();os.Exit(code)
  }
  os.Exit(m.Run())
 }
+func resetLedger()error{
+ r,ok:=testSvc.(ledger.Resetter);if !ok{return errors.New("ledger service does not implement Resetter")}
+ return r.Reset(context.Background())
+}
 func newRouter(t *testing.T)http.Handler{
  t.Helper();if os.Getenv("TEST_DATABASE_URL")==""{t.Skip("set TEST_DATABASE_URL and apply migrations; Redis required")}
- if err:=ledger.Reset();err!=nil{t.Fatal(err)}
- t.Cleanup(func(){if err:=ledger.Reset();err!=nil{t.Error(err)}});return NewRouter()
+ if err:=resetLedger();err!=nil{t.Fatal(err)}
+ t.Cleanup(func(){if err:=resetLedger();err!=nil{t.Error(err)}});return NewRouter(testSvc)
 }
 func doRequest(h http.Handler,method,path,body string)*httptest.ResponseRecorder{
  req:=httptest.NewRequest(method,path,strings.NewReader(body));req.Header.Set("Content-Type","application/json")
@@ -80,7 +89,7 @@ func TestTransactionsHTTP(t *testing.T){
  if len(decodeBody[[]TransactionResponse](t,doRequest(h,"GET","/api/transactions","")))!=1{t.Fatal("rejected transaction saved")}
 }
 func TestRoutingErrors(t *testing.T){
- t.Parallel();h:=NewRouter()
+ t.Parallel();h:=NewRouter(nil)
  for _,tc:=range []struct{method,path string;status int;message string}{
   {"GET","/unknown",404,"not found"},{"GET","/api/nope",404,"not found"},
   {"DELETE","/api/transactions",405,"method not allowed"},{"PUT","/api/budgets",405,"method not allowed"},
@@ -90,6 +99,6 @@ func TestRoutingErrors(t *testing.T){
 }
 func TestLoggingMiddleware(t *testing.T){
  var buf bytes.Buffer;log.SetOutput(&buf);t.Cleanup(func(){log.SetOutput(io.Discard)})
- doRequest(NewRouter(),"GET","/ping","")
+ doRequest(NewRouter(nil),"GET","/ping","")
  if !strings.Contains(buf.String(),"GET /ping"){t.Fatal(buf.String())}
 }
