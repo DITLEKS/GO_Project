@@ -21,6 +21,9 @@ type Service interface {
 	ListBudgets(ctx context.Context) ([]domain.Budget, error)
 	// AddTransaction validates, applies the budget rule and saves; returns the record with its ID.
 	AddTransaction(ctx context.Context, t domain.Transaction) (domain.Transaction, error)
+	// ImportTransactions imports a batch concurrently with the given number of workers
+	// (workers <= 0 means the default). On cancellation it returns the partial summary and the context error.
+	ImportTransactions(ctx context.Context, txs []domain.Transaction, workers int) (domain.ImportResult, error)
 	ListTransactions(ctx context.Context) ([]domain.Transaction, error)
 	ReportSummary(ctx context.Context, from, to time.Time) (domain.ReportSummary, error)
 }
