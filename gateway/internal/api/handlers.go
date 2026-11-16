@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -67,15 +68,25 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	return nil
 }
 
-// writeServiceError maps service errors to the unchanged HTTP contract:
-// validation → 400 with the validation message, budget → 409, the rest → 500.
-func writeServiceError(w http.ResponseWriter, op string, err error) {
+// isCancelled reports whether the operation failed because the request context
+// was cancelled or its timeout expired.
+func isCancelled(r *http.Request, err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || r.Context().Err() != nil
+}
+
+// writeServiceError maps service errors to the HTTP contract:
+// validation → 400 with the validation message, budget → 409,
+// cancellation or timeout → 504, the rest → 500.
+func writeServiceError(w http.ResponseWriter, r *http.Request, op string, err error) {
 	var invalid *ledger.ValidationError
 	switch {
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusBadRequest, invalid.Error())
 	case errors.Is(err, ledger.ErrBudgetExceeded):
 		writeError(w, http.StatusConflict, "budget exceeded")
+	case isCancelled(r, err):
+		log.Printf("%s прерван по контексту запроса: %v", op, err)
+		writeError(w, http.StatusGatewayTimeout, timeoutMessage)
 	default:
 		log.Printf("неожиданная ошибка %s: %v", op, err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -112,7 +123,7 @@ func (h *Handler) createTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := h.svc.AddTransaction(r.Context(), req.ToDomain())
 	if err != nil {
-		writeServiceError(w, "AddTransaction", err)
+		writeServiceError(w, r, "AddTransaction", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, NewTransactionResponse(created))
@@ -121,7 +132,7 @@ func (h *Handler) createTransaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.ListTransactions(r.Context())
 	if err != nil {
-		writeServiceError(w, "ListTransactions", err)
+		writeServiceError(w, r, "ListTransactions", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, NewTransactionResponses(list))
@@ -135,7 +146,7 @@ func (h *Handler) createBudget(w http.ResponseWriter, r *http.Request) {
 	}
 	saved, err := h.svc.SetBudget(r.Context(), req.ToDomain())
 	if err != nil {
-		writeServiceError(w, "SetBudget", err)
+		writeServiceError(w, r, "SetBudget", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, NewBudgetResponse(saved))
@@ -144,13 +155,14 @@ func (h *Handler) createBudget(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listBudgets(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.ListBudgets(r.Context())
 	if err != nil {
-		writeServiceError(w, "ListBudgets", err)
+		writeServiceError(w, r, "ListBudgets", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, NewBudgetResponses(list))
 }
 
-// Additive endpoint; existing routes and DTOs are unchanged.
+// ReportSummary: GET /api/reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD.
+// Bad dates → 400; cancellation or timeout → 504.
 func (h *Handler) ReportSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
@@ -169,7 +181,7 @@ func (h *Handler) ReportSummary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, reportRangeMessage)
 			return
 		}
-		writeServiceError(w, "ReportSummary", err)
+		writeServiceError(w, r, "ReportSummary", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
