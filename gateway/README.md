@@ -1,6 +1,21 @@
-# Gateway: HTTP поверх SQL Ledger
+# Gateway: HTTP поверх сервиса Ledger
 
-Прежние маршруты и DTO сохранены; Gateway импортирует Ledger через локальный replace и открывает свой SQL-пул. Отдельного сетевого Ledger пока нет. Добавлен GET /api/reports/summary, которого раньше не было.
+Прежние маршруты и DTO сохранены. Gateway импортирует Ledger через локальный replace и знает только интерфейс `ledger.Service` и фабрику `ledger.NewService`: `database/sql`, pgx и пакеты хранения он не импортирует. Отдельного сетевого Ledger пока нет.
+
+## Инициализация
+
+```go
+svc, closeFn, err := ledger.NewService(ctx) // env → sql.Open → Ping(ctx) → репозитории → сервис
+if err != nil {
+    return err // main логирует ошибку и завершает работу
+}
+defer closeFn()
+srv := &http.Server{Addr: ":8080", Handler: api.NewRouter(svc)}
+```
+
+Обработчики вызывают методы сервиса и переводят его ошибки в HTTP-ответы: `ledger.ValidationError` → 400 с текстом ошибки, `ledger.ErrBudgetExceeded` → 409 `budget exceeded`, остальное → 500 `internal server error`. Валидация и правило бюджета выполняются в сервисе, не в обработчиках.
+
+## Запуск
 
 Из корня после установки Goose (см. корневой README):
 
@@ -13,7 +28,7 @@ goose -dir ledger/migrations postgres "$DATABASE_URL" up
 # Откат последней миграции: goose -dir ledger/migrations postgres "$DATABASE_URL" down
 ```
 
-Без Docker создайте БД `createdb -h localhost -U postgres cashapp`, запустите Redis. DATABASE_URL приоритетна, fallback DB_HOST=localhost DB_PORT=5432 DB_USER=postgres DB_PASS=postgres DB_NAME=cashapp. REDIS_ADDR=localhost:6379, REDIS_DB=0, REDIS_PASSWORD опциональна. `.env` экспортируется вручную. Миграции применяются до запуска; ошибка подключения останавливает процесс.
+Без Docker создайте БД `createdb -h localhost -U postgres cashapp`, запустите Redis. DATABASE_URL приоритетна, fallback DB_HOST=localhost DB_PORT=5432 DB_USER=postgres DB_PASS=postgres DB_NAME=cashapp. REDIS_ADDR=localhost:6379, REDIS_DB=0, REDIS_PASSWORD опциональна. `.env` экспортируется вручную. Переменные читает фабрика Ledger. Миграции применяются до запуска (фабрика их не запускает); ошибка подключения останавливает процесс.
 
 ```bash
 # 201, затем 201 и SQL ID
@@ -30,4 +45,6 @@ curl -i 'localhost:8080/api/reports/summary?from=2026-11-01&to=2026-11-30'
 
 Валидация → 400, лимит → 409, SQL-ошибка → 500, все ответы JSON с application/json; charset=utf-8. Расходы отрицательные, как в предыдущих заданиях. После Ctrl+C и `go run .` повторите GET: записи сохраняются в PostgreSQL. Docker использует постоянный том; down -v удаляет данные.
 
-Для тестов задайте отдельную TEST_DATABASE_URL и REDIS_DB=15, примените миграции, затем из gateway: `go vet ./...`, `go test -count=1 -race -cover -coverprofile=cover.out ./...`, `go tool cover -html=cover.out -o cover.html`. Reset очищает тестовую БД. Без TEST_DATABASE_URL интеграционные сценарии пропускаются; в CI они включены. Проценты и полный порядок запуска — в корневом README.
+## Тесты
+
+Задайте отдельную TEST_DATABASE_URL и REDIS_DB=15, примените миграции, затем из gateway: `go vet ./...`, `go test -count=1 -race -cover -coverprofile=cover.out ./...`, `go tool cover -html=cover.out -o cover.html`. Тесты получают сервис через `ledger.NewService`, как `main.go`; тестовая БД очищается через `ledger.Resetter`. Без TEST_DATABASE_URL интеграционные сценарии пропускаются; в CI они включены. Полный порядок запуска — в корневом README.
