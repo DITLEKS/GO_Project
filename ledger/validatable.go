@@ -1,13 +1,15 @@
 package ledger
 
-// Validatable задаёт контракт на проверку валидности данных структуры.
-// Методы Validate() не логируют — они только возвращают error.
-type Validatable interface {
-	Validate() error
-}
+import "github.com/DITLEKS/GO_Project/ledger/internal/domain"
 
-// CheckValid принимает любой Validatable и возвращает результат его проверки
-// (полиморфизм через интерфейс).
+type (
+	// Validatable задаёт контракт на проверку валидности данных структуры.
+	Validatable = domain.Validatable
+	// ValidationError marks a service error caused by invalid input (HTTP 400 in Gateway).
+	ValidationError = domain.ValidationError
+)
+
+// CheckValid принимает любой Validatable и возвращает результат его проверки.
 func CheckValid(v Validatable) error {
-	return v.Validate()
+	return domain.CheckValid(v)
 }
