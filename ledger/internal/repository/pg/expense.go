@@ -10,6 +10,7 @@ import (
 )
 
 // ExpenseRepository implements domain.ExpenseRepository.
+// Every query uses the Context variant, so cancelling ctx interrupts the SQL operation.
 type ExpenseRepository struct {
 	db *sql.DB
 }
@@ -39,7 +40,7 @@ func (r *ExpenseRepository) List(ctx context.Context) ([]domain.Transaction, err
 	for rows.Next() {
 		var t domain.Transaction
 		var date time.Time
-		if err := rows.Scan(&t.ID, &t.Amount, &t.Category, &t.Description, &date); err != nil {
+		if err := rows.Scan(&t.ID, &t.Amount, &t.Category, &t.Description, &t.Date); err != nil {
 			return nil, fmt.Errorf("scan expense: %w", err)
 		}
 		t.Date = date.Format(domain.DateLayout)
@@ -59,23 +60,33 @@ func (r *ExpenseRepository) SumByCategory(ctx context.Context, category string) 
 	return spent, nil
 }
 
-// TotalsByCategory uses one SQL snapshot for category values and totals.
-func (r *ExpenseRepository) TotalsByCategory(ctx context.Context, from, to string) ([]domain.CategoryTotals, error) {
-	rows, err := conn(ctx, r.db).QueryContext(ctx, `SELECT category,SUM(amount),
-        SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),
-        SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END)
-        FROM expenses WHERE date >= $1::date AND date <= $2::date GROUP BY category ORDER BY category`, from, to)
+func (r *ExpenseRepository) CategoriesInPeriod(ctx context.Context, from, to string) ([]string, error) {
+	rows, err := conn(ctx, r.db).QueryContext(ctx, `SELECT DISTINCT category FROM expenses
+        WHERE date >= $1::date AND date <= $2::date ORDER BY category`, from, to)
 	if err != nil {
-		return nil, fmt.Errorf("report aggregation: %w", err)
+		return nil, fmt.Errorf("list report categories: %w", err)
 	}
 	defer rows.Close()
-	result := make([]domain.CategoryTotals, 0)
+	result := make([]string, 0)
 	for rows.Next() {
-		var row domain.CategoryTotals
-		if err := rows.Scan(&row.Category, &row.Total, &row.Income, &row.Expenses); err != nil {
-			return nil, fmt.Errorf("scan report row: %w", err)
+		var category string
+		if err := rows.Scan(&category); err != nil {
+			return nil, fmt.Errorf("scan report category: %w", err)
 		}
-		result = append(result, row)
+		result = append(result, category)
 	}
 	return result, rows.Err()
+}
+
+func (r *ExpenseRepository) TotalsForCategory(ctx context.Context, category, from, to string) (domain.CategoryTotals, error) {
+	row := domain.CategoryTotals{Category: category}
+	err := conn(ctx, r.db).QueryRowContext(ctx, `SELECT COALESCE(SUM(amount),0),
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0)
+        FROM expenses WHERE category=$1 AND date >= $2::date AND date <= $3::date`,
+		category, from, to).Scan(&row.Total, &row.Income, &row.Expenses)
+	if err != nil {
+		return domain.CategoryTotals{}, fmt.Errorf("report aggregation for %q: %w", category, err)
+	}
+	return row, nil
 }

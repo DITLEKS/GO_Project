@@ -21,8 +21,11 @@ type ExpenseRepository interface {
 	List(ctx context.Context) ([]Transaction, error)
 	// SumByCategory returns the positive amount spent in the category; income is ignored.
 	SumByCategory(ctx context.Context, category string) (float64, error)
-	// TotalsByCategory aggregates the inclusive interval [from, to] (YYYY-MM-DD).
-	TotalsByCategory(ctx context.Context, from, to string) ([]CategoryTotals, error)
+	// CategoriesInPeriod lists, in alphabetical order, the categories that have
+	// transactions in the inclusive interval [from, to] (YYYY-MM-DD).
+	CategoriesInPeriod(ctx context.Context, from, to string) ([]string, error)
+	// TotalsForCategory aggregates one category over the inclusive interval [from, to].
+	TotalsForCategory(ctx context.Context, category, from, to string) (CategoryTotals, error)
 }
 
 // CategoryLocker runs fn atomically while holding an exclusive lock on the category.

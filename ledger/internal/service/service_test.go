@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/DITLEKS/GO_Project/ledger/internal/domain"
 )
@@ -30,7 +33,13 @@ func (f *fakeBudgets) List(context.Context) ([]domain.Budget, error) {
 	return result, nil
 }
 
-type fakeExpenses struct{ items []domain.Transaction }
+type fakeExpenses struct {
+	items []domain.Transaction
+	// delay makes TotalsForCategory slow; it still stops early when ctx is cancelled.
+	delay time.Duration
+	// calls counts TotalsForCategory calls made by the report goroutines.
+	calls atomic.Int32
+}
 
 func (f *fakeExpenses) Add(_ context.Context, t domain.Transaction) (domain.Transaction, error) {
 	t.ID = len(f.items) + 1
@@ -50,8 +59,41 @@ func (f *fakeExpenses) SumByCategory(_ context.Context, category string) (float6
 	return spent, nil
 }
 
-func (f *fakeExpenses) TotalsByCategory(context.Context, string, string) ([]domain.CategoryTotals, error) {
-	return nil, nil
+func (f *fakeExpenses) CategoriesInPeriod(_ context.Context, from, to string) ([]string, error) {
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	for _, t := range f.items {
+		if t.Date >= from && t.Date <= to && !seen[t.Category] {
+			seen[t.Category] = true
+			result = append(result, t.Category)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (f *fakeExpenses) TotalsForCategory(ctx context.Context, category, from, to string) (domain.CategoryTotals, error) {
+	f.calls.Add(1)
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return domain.CategoryTotals{}, ctx.Err()
+		}
+	}
+	row := domain.CategoryTotals{Category: category}
+	for _, t := range f.items {
+		if t.Category != category || t.Date < from || t.Date > to {
+			continue
+		}
+		row.Total += t.Amount
+		if t.Amount > 0 {
+			row.Income += t.Amount
+		} else {
+			row.Expenses -= t.Amount
+		}
+	}
+	return row, nil
 }
 
 type fakeLocker struct{}
@@ -63,6 +105,15 @@ func (fakeLocker) WithCategoryLock(ctx context.Context, _ string, fn func(ctx co
 func newTestLedger() (*Ledger, *fakeExpenses) {
 	expenses := &fakeExpenses{}
 	return New(&fakeBudgets{items: map[string]domain.Budget{}}, expenses, fakeLocker{}, nil, nil), expenses
+}
+
+func day(t *testing.T, value string) time.Time {
+	t.Helper()
+	d, err := time.Parse(domain.DateLayout, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 func TestAddTransactionBudgetRule(t *testing.T) {
@@ -109,5 +160,70 @@ func TestValidationErrors(t *testing.T) {
 	}
 	if len(expenses.items) != 0 {
 		t.Fatal("invalid data saved")
+	}
+}
+
+func TestReportSummaryConcurrent(t *testing.T) {
+	t.Parallel()
+	svc, expenses := newTestLedger()
+	ctx := context.Background()
+	for _, tx := range []domain.Transaction{
+		{Amount: 1000, Category: "зарплата", Date: "2026-10-01"},
+		{Amount: -25.50, Category: "еда", Date: "2026-10-31"},
+		{Amount: -100, Category: "еда", Date: "2026-10-10"},
+		{Amount: -40, Category: "транспорт", Date: "2026-10-15"},
+		{Amount: -999, Category: "вне периода", Date: "2026-11-01"},
+	} {
+		if _, err := svc.AddTransaction(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := svc.ReportSummary(ctx, day(t, "2026-10-01"), day(t, "2026-10-31"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Income != 1000 || report.Expenses != 165.50 || report.Balance != 834.50 {
+		t.Fatalf("incorrect totals: %+v", report)
+	}
+	want := []domain.CategorySummary{{Category: "еда", Total: -125.50}, {Category: "зарплата", Total: 1000}, {Category: "транспорт", Total: -40}}
+	if len(report.Categories) != len(want) {
+		t.Fatalf("incorrect categories: %+v", report.Categories)
+	}
+	for i := range want {
+		if report.Categories[i] != want[i] {
+			t.Fatalf("category %d: got %+v, want %+v", i, report.Categories[i], want[i])
+		}
+	}
+	// One calculation per category of the period.
+	if got := expenses.calls.Load(); got != 3 {
+		t.Fatalf("expected 3 category calculations, got %d", got)
+	}
+
+	empty, err := svc.ReportSummary(ctx, day(t, "2020-01-01"), day(t, "2020-01-01"))
+	if err != nil || empty.Categories == nil || len(empty.Categories) != 0 {
+		t.Fatal(empty, err)
+	}
+}
+
+func TestReportSummaryCancelled(t *testing.T) {
+	t.Parallel()
+	svc, expenses := newTestLedger()
+	for _, category := range []string{"a", "b", "c"} {
+		if _, err := svc.AddTransaction(context.Background(), domain.Transaction{Amount: -1, Category: category, Date: "2026-10-01"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each category would take 5 seconds; the context allows 50 ms.
+	expenses.delay = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := svc.ReportSummary(ctx, day(t, "2026-10-01"), day(t, "2026-10-31"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+	// ReportSummary returns only after all workers and the heartbeat have exited.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("calculation was not interrupted: took %s", elapsed)
 	}
 }
