@@ -40,7 +40,7 @@ func (r *ExpenseRepository) List(ctx context.Context) ([]domain.Transaction, err
 	for rows.Next() {
 		var t domain.Transaction
 		var date time.Time
-		if err := rows.Scan(&t.ID, &t.Amount, &t.Category, &t.Description, &t.Date); err != nil {
+		if err := rows.Scan(&t.ID, &t.Amount, &t.Category, &t.Description, &date); err != nil {
 			return nil, fmt.Errorf("scan expense: %w", err)
 		}
 		t.Date = date.Format(domain.DateLayout)
