@@ -1,6 +1,6 @@
 # GO_Project
 
-Дисциплина «Язык Go», темы 1–9. Требуются Go 1.22+, PostgreSQL 16+, Redis 7+.
+Дисциплина «Язык Go», темы 1–10. Требуются Go 1.22+, PostgreSQL 16+, Redis 7+.
 
 ## Архитектура
 
@@ -16,10 +16,12 @@ ledger/
   *.go                       публичный фасад: псевдонимы типов, интерфейс Service, фабрика NewService
   internal/domain/           сущности, Validate, контракты хранения (без SQL и HTTP)
   internal/repository/pg/    реализация контрактов на PostgreSQL (весь SQL здесь)
-  internal/service/          бизнес-логика: валидация, правило бюджета, отчёт и его кеш
+  internal/service/          бизнес-логика: валидация, правило бюджета, отчёт, пакетный импорт
   internal/app/              сборка: env → sql.Open → Ping → репозитории → сервис
   internal/cache/            клиент Redis для кеша отчётов
   migrations/                миграции Goose
+docs/
+  bulk-import.md             подробное описание пакетного импорта
 ```
 
 - домен не зависит от репозиториев и HTTP;
@@ -41,7 +43,7 @@ defer closeFn()
 srv := &http.Server{Addr: ":8080", Handler: api.NewRouter(svc)}
 ```
 
-Фабрика возвращает `(Service, func() error, error)` и не запускает миграции. Обработчики вызывают методы `svc`: `SetBudget`, `ListBudgets`, `AddTransaction`, `ListTransactions`, `ReportSummary`.
+Фабрика возвращает `(Service, func() error, error)` и не запускает миграции. Обработчики вызывают методы `svc`: `SetBudget`, `ListBudgets`, `AddTransaction`, `ImportTransactions`, `ListTransactions`, `ReportSummary`.
 
 Ledger пока библиотека, не отдельный HTTP/RPC-сервис. `ledger/cmd/server` отдельно проверяет готовность инфраструктуры; Gateway не обращается к нему по сети.
 
@@ -92,12 +94,53 @@ goose -dir ledger/migrations postgres "$DATABASE_URL" down
 | POST | /api/budgets | UPSERT, 201 и бюджет |
 | GET | /api/budgets | 200, массив по category |
 | POST | /api/transactions | 201 и запись с SQL ID; 409 при превышении |
+| POST | /api/transactions/bulk?workers=N | 200 и сводка импорта, даже при частичных отказах |
 | GET | /api/transactions | 200, массив по date DESC, id DESC |
 | GET | /api/reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD | 200, отчёт за включительный интервал |
 
 Все ответы: `application/json; charset=utf-8`, ошибки `{"error":"…"}`. Валидация/JSON → 400, превышение → 409 `budget exceeded`, таймаут или отмена запроса → 504 `request timeout`, SQL → 500 без раскрытия SQL клиенту, неизвестный путь → 404, метод → 405. Пустые списки → []. Middleware логирует метод, путь, длительность.
 
-Прежние пути/DTO сохранены: обработчики переводят ошибки сервиса в прежние ответы (`ValidationError` → 400 с тем же текстом, `ErrBudgetExceeded` → 409). В теме 9 добавлен только код 504.
+Прежние пути/DTO сохранены: обработчики переводят ошибки сервиса в прежние ответы (`ValidationError` → 400 с тем же текстом, `ErrBudgetExceeded` → 409). В теме 9 добавлен код 504, в теме 10 — маршрут пакетного импорта.
+
+### Пакетный импорт транзакций
+
+`POST /api/transactions/bulk` принимает JSON-массив транзакций в том же формате, что и одиночный `POST /api/transactions`, и обрабатывает его пулом воркеров в Ledger.
+
+| Параметр | Значение |
+|---|---|
+| Тело | JSON-массив объектов `amount`, `category`, `description`, `date`; не больше 1000 элементов и 1 МБ |
+| `?workers=N` | число воркеров, целое от 1 до 8; без параметра — 4 |
+| Успешный ответ | 200 и сводка `accepted`, `rejected`, `errors[]`, в том числе когда часть элементов отклонена |
+| Некорректное тело или `workers` | 400, `{"error":"…"}` |
+| Таймаут или отмена | 504, `{"error":"request timeout"}` |
+
+```bash
+# Бюджет 100 на категорию
+curl -i -X POST localhost:8080/api/budgets -H 'Content-Type: application/json' -d '{"category":"еда","limit":100}'
+# Пакет из четырёх транзакций, 4 воркера
+curl -i -X POST 'localhost:8080/api/transactions/bulk?workers=4' -H 'Content-Type: application/json' -d '[{"amount":-60,"category":"еда","date":"2026-11-01"},{"amount":-60,"category":"еда","date":"2026-11-02"},{"amount":0,"category":"еда"},{"amount":10,"category":"еда","date":"2026-11-03"}]'
+# Без workers — значение по умолчанию
+curl -i -X POST localhost:8080/api/transactions/bulk -H 'Content-Type: application/json' -d '[{"amount":-5,"category":"такси"}]'
+# 400: workers вне диапазона
+curl -i -X POST 'localhost:8080/api/transactions/bulk?workers=99' -H 'Content-Type: application/json' -d '[]'
+```
+
+Ответ на пакет из четырёх транзакций — `200 OK`:
+
+```json
+{
+  "accepted": 2,
+  "rejected": 2,
+  "errors": [
+    {"index": 1, "error": "budget exceeded"},
+    {"index": 2, "error": "сумма транзакции не может быть равна нулю или быть некорректным числом"}
+  ]
+}
+```
+
+`index` — позиция элемента во входном массиве, с нуля. Элементы обрабатываются параллельно, поэтому из двух расходов по 60 отклонён может быть любой (индекс 0 или 1); лимит при этом не превышается. Импорт не атомарен: принятые транзакции сохраняются, даже если другие отклонены; при 504 часть пакета тоже может быть уже сохранена.
+
+Устройство (`ledger/internal/service/import.go`): канал `jobs` с заданиями, N воркеров, канал `results`, горутина-коллектор. `jobs` закрывается после отправки всех заданий, `results` — после `sync.WaitGroup.Wait()`. Счётчики ведутся через `atomic.Int64`, список ошибок наполняет только коллектор. Воркеры проверяют `ctx.Done()` в `select`; каждая транзакция проходит ту же валидацию и то же правило бюджета, что и одиночный POST. Подробности — в [docs/bulk-import.md](docs/bulk-import.md).
 
 ### Отчёт по категориям
 
@@ -151,7 +194,7 @@ Middleware `Timeout` (`gateway/internal/api/middleware.go`) оборачивае
 | Некорректное или неположительное значение | игнорируется, используется значение по умолчанию; в лог пишется предупреждение |
 | Ответ при превышении | **504 Gateway Timeout**, `{"error":"request timeout"}` |
 
-Тот же ответ 504 возвращается, если запрос отменён по другой причине (`ctx.Done()`). Внутри сервиса у операций есть собственный предел 5 секунд; действует меньший из двух.
+Middleware буферизует ответ обработчика и отдаёт его клиенту только если обработчик успел до дедлайна. Когда время вышло, клиент получает 504 сразу, а поздний ответ обработчика отбрасывается. Тот же ответ 504 возвращается, если запрос отменён по другой причине (`ctx.Done()`). Остановка самой работы кооперативная: сервис и SQL-запросы завершаются по отмене контекста, принудительно горутину middleware не прерывает. Внутри сервиса у операций есть собственный предел 5 секунд; действует меньший из двух.
 
 Проверка малого таймаута:
 
@@ -162,7 +205,7 @@ curl -i 'localhost:8080/api/reports/summary?from=2026-11-01&to=2026-11-30'
 # {"error":"request timeout"}
 ```
 
-В логе сервера при этом видно, что расчёт прерван по контексту: `report: calculation interrupted: context deadline exceeded` и, если расчёт успел начаться, `report: heartbeat stopped: context deadline exceeded`. При таймауте 1 мс запрос обычно обрывается ещё до запуска горутин, поэтому второй строки может не быть; на 50 мс и медленной БД она появляется.
+В логе сервера при прерывании расчёта появляется `report: calculation interrupted: context deadline exceeded` и, если расчёт успел начаться, `report: heartbeat stopped: context deadline exceeded`. При таймауте 1 мс запрос обычно обрывается ещё до запуска горутин, поэтому этих строк может не быть; если отчёт уже лежит в кеше Redis, он может успеть вернуться с кодом 200.
 
 ### Правила
 
@@ -194,7 +237,9 @@ curl -i 'localhost:8080/api/reports/summary?from=01.11.2026&to=2026-11-30'
 
 ## Тесты и покрытие
 
-Независимые table-driven unit-тесты используют t.Run/t.Parallel. Тесты сервиса (`ledger/internal/service`) работают на фейковых репозиториях, без PostgreSQL и Redis: правило бюджета, валидация, конкурентный расчёт отчёта и его прерывание по таймауту контекста. Тесты таймаута Gateway (`gateway/internal/api/timeout_test.go`) используют сервис-заглушку, который ждёт `ctx.Done()`, и проверяют ответ 504 для всех API-маршрутов. SQL/HTTP-тесты — с настоящими PostgreSQL/Redis, без параллельного Reset. Проверяются валидация, UPSERT, 409 без вставки, сортировка, ID, отчёты, TTL, cache hit/invalidation, переподключение, конкурентное соблюдение лимита.
+Независимые table-driven unit-тесты используют t.Run/t.Parallel. Тесты сервиса (`ledger/internal/service`) работают на фейковых репозиториях, без PostgreSQL и Redis: правило бюджета, валидация, конкурентный расчёт отчёта и его прерывание по таймауту контекста, пакетный импорт (лимит при параллельной обработке, индексы ошибок, разное число воркеров, прерывание). Тесты Gateway на сервисах-заглушках проверяют ответ 504 для всех API-маршрутов, отбрасывание позднего ответа и обработчик пакетного импорта (200, 400, 405, 504). SQL/HTTP-тесты — с настоящими PostgreSQL/Redis, без параллельного Reset. Проверяются валидация, UPSERT, 409 без вставки, сортировка, ID, отчёты, TTL, cache hit/invalidation, переподключение, конкурентное соблюдение лимита, сквозной пакетный импорт.
+
+Все тесты запускаются с детектором гонок (`-race`) — и локально командами ниже, и в CI.
 
 Тесты пакета `ledger` из прошлых тем сохранены: `testmain_test.go` сопоставляет прежние функции (`SetBudget`, `AddTransaction`, ...) с сервисом из фабрики. Тесты Gateway получают сервис через `ledger.NewService`.
 
